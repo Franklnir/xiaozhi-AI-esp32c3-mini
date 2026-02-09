@@ -39,7 +39,8 @@ GND     ────────► GND                GND
 
 ESP32-C3          Push Button
 ─────────         ───────────
-GPIO 3  ────────► One side
+GPIO 3  ────────► One side (mode normal)
+GPIO 2  ────────► 1x klik untuk aktifkan mode ngobrol otomatis, jika lebih dari 12 detik gk ada respon xiaozhi masuk ke mode low power, cara bangunin nya tinggal katakan "hi jason"
 GND     ────────► Other side
 
 ESP32-C3          SSD1306 OLED (Optional)
