@@ -1,0 +1,172 @@
+menu "Xiaozhi Assistant"
+
+config OTA_URL
+    string "Default OTA URL"
+    default "https://api.tenclass.net/xiaozhi/ota/"
+    help
+        The application will access this URL to check for new firmwares and server address.
+
+choice
+    prompt "Flash Assets"
+    default FLASH_DEFAULT_ASSETS
+    help
+        Select the assets to flash.
+
+    config FLASH_NONE_ASSETS
+        bool "Do not flash assets"
+    config FLASH_DEFAULT_ASSETS
+        bool "Flash Default Assets"
+    config FLASH_CUSTOM_ASSETS
+        bool "Flash Custom Assets"
+endchoice
+
+config CUSTOM_ASSETS_FILE
+    depends on FLASH_CUSTOM_ASSETS
+    string "Custom Assets File"
+    default "assets.bin"
+    help
+        The custom assets file to flash.
+        It can be a local file relative to the project directory or a remote url.
+
+choice
+    prompt "Default Language"
+    default LANGUAGE_EN_US
+    help
+        Select device display language
+
+    config LANGUAGE_ZH_CN
+        bool "Chinese"
+    config LANGUAGE_ZH_TW
+        bool "Chinese Traditional"
+    config LANGUAGE_EN_US
+        bool "English"
+    config LANGUAGE_JA_JP
+        bool "Japanese"
+    config LANGUAGE_KO_KR
+        bool "Korean"
+    config LANGUAGE_VI_VN
+        bool "Vietnamese"
+    config LANGUAGE_TH_TH
+        bool "Thai"
+    config LANGUAGE_DE_DE
+        bool "German"
+    config LANGUAGE_FR_FR
+        bool "French"
+    config LANGUAGE_ES_ES
+        bool "Spanish"
+    config LANGUAGE_IT_IT
+        bool "Italian"
+    config LANGUAGE_RU_RU
+        bool "Russian"
+    config LANGUAGE_AR_SA
+        bool "Arabic"
+    config LANGUAGE_HI_IN
+        bool "Hindi"
+    config LANGUAGE_PT_PT
+        bool "Portuguese"
+    config LANGUAGE_PL_PL
+        bool "Polish"
+    config LANGUAGE_CS_CZ
+        bool "Czech"
+    config LANGUAGE_FI_FI
+        bool "Finnish"
+    config LANGUAGE_TR_TR
+        bool "Turkish"
+    config LANGUAGE_ID_ID
+        bool "Indonesian"
+    config LANGUAGE_UK_UA
+        bool "Ukrainian"
+    config LANGUAGE_RO_RO
+        bool "Romanian"
+    config LANGUAGE_BG_BG
+        bool "Bulgarian"
+    config LANGUAGE_CA_ES
+        bool "Catalan"
+    config LANGUAGE_DA_DK
+        bool "Danish"
+    config LANGUAGE_EL_GR
+        bool "Greek"
+    config LANGUAGE_FA_IR
+        bool "Persian"
+    config LANGUAGE_FIL_PH
+        bool "Filipino"
+    config LANGUAGE_HE_IL
+        bool "Hebrew"
+    config LANGUAGE_HR_HR
+        bool "Croatian"
+    config LANGUAGE_HU_HU
+        bool "Hungarian"
+    config LANGUAGE_MS_MY
+        bool "Malay"
+    config LANGUAGE_NB_NO
+        bool "Norwegian"
+    config LANGUAGE_NL_NL
+        bool "Dutch"
+    config LANGUAGE_SK_SK
+        bool "Slovak"
+    config LANGUAGE_SL_SI
+        bool "Slovenian"
+    config LANGUAGE_SV_SE
+        bool "Swedish"
+    config LANGUAGE_SR_RS
+        bool "Serbian"
+endchoice
+
+choice BOARD_TYPE
+    prompt "Board Type"
+    default BOARD_TYPE_ESP32C3_INMP441
+    help
+        Board type.
+    config BOARD_TYPE_ESP32C3_INMP441
+        bool "ESP32-C3 INMP441+MAX98357A (Custom)"
+        depends on IDF_TARGET_ESP32C3
+endchoice
+
+choice WAKE_WORD_TYPE
+    prompt "Wake Word Implementation Type"
+    default USE_ESP_WAKE_WORD
+    help
+        Choose the type of wake word implementation to use
+
+    config WAKE_WORD_DISABLED
+        bool "Disabled"
+        help
+            Disable wake word detection
+
+    config USE_ESP_WAKE_WORD
+        bool "Wakenet model without AFE"
+        depends on IDF_TARGET_ESP32C3
+        help
+            Support ESP32 C3
+endchoice
+
+config RECEIVE_CUSTOM_MESSAGE
+    bool "Enable Custom Message Reception"
+    default n
+    help
+        Enable custom message reception, allow the device to receive custom messages from the server (preferably through the MQTT protocol)
+
+menu "WiFi Configuration Method"
+    help
+        WiFi Configuration Method Selection
+    config USE_HOTSPOT_WIFI_PROVISIONING
+        bool "Hotspot"
+        default y
+        help
+            Use WiFi Hotspot to transmit WiFi configuration data
+    config USE_ACOUSTIC_WIFI_PROVISIONING
+        bool "Acoustic"
+        help
+            Use audio signal to transmit WiFi configuration data
+
+    config USE_ESP_BLUFI_WIFI_PROVISIONING
+        bool "Esp Blufi"
+        help
+            Use esp blufi protocol to transmit WiFi configuration data
+        select BT_ENABLED
+        select BT_BLE_42_FEATURES_SUPPORTED
+        select BT_BLE_BLUFI_ENABLE
+        select MBEDTLS_DHM_C
+endmenu
+
+endmenu
