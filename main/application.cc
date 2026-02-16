@@ -15,11 +15,14 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <esp_err.h>
 #include <esp_log.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
 #include <font_awesome.h>
+#include <initializer_list>
+#include <nvs.h>
 #include <vector>
 
 #define TAG "Application"
@@ -60,6 +63,125 @@ bool IsLocalSongStopCommand(const std::string& lowered_text) {
     return has("stop") || has("berhenti") || has("hentikan") || has("henti") ||
            has("pause") || has("cukup");
 }
+
+bool ContainsToken(const std::string& lowered_text, std::initializer_list<const char*> tokens) {
+    for (const char* token : tokens) {
+        if (lowered_text.find(token) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ContainsNormalizedPhrase(const std::string& normalized_text, const char* phrase) {
+    std::string token(phrase);
+    if (token.empty()) {
+        return false;
+    }
+    size_t pos = normalized_text.find(token);
+    while (pos != std::string::npos) {
+        bool left_ok = (pos == 0) || (normalized_text[pos - 1] == ' ');
+        size_t end = pos + token.size();
+        bool right_ok = (end == normalized_text.size()) || (normalized_text[end] == ' ');
+        if (left_ok && right_ok) {
+            return true;
+        }
+        pos = normalized_text.find(token, pos + 1);
+    }
+    return false;
+}
+
+std::string NormalizeCommandText(const std::string& text) {
+    std::string normalized;
+    normalized.reserve(text.size());
+
+    bool prev_space = true;
+    for (unsigned char ch : text) {
+        if (std::isalnum(ch)) {
+            normalized.push_back(static_cast<char>(std::tolower(ch)));
+            prev_space = false;
+            continue;
+        }
+        if (!prev_space) {
+            normalized.push_back(' ');
+            prev_space = true;
+        }
+    }
+
+    if (!normalized.empty() && normalized.back() == ' ') {
+        normalized.pop_back();
+    }
+    return normalized;
+}
+
+bool IsWifiResetQuickConfirmCommand(const std::string& normalized_text) {
+    return normalized_text == "ya" ||
+           normalized_text == "iya" ||
+           normalized_text == "yes" ||
+           normalized_text.rfind("ya ", 0) == 0 ||
+           normalized_text.rfind("iya ", 0) == 0 ||
+           normalized_text.rfind("yes ", 0) == 0;
+}
+
+bool IsWifiResetCommand(const std::string& lowered_text) {
+    return ContainsToken(lowered_text, {
+        "reset wifi",
+        "reset wi-fi",
+        "ganti wifi",
+        "ganti wi-fi",
+        "ubah wifi",
+        "ubah ssid",
+        "change wifi",
+        "hapus wifi",
+        "hapus wi-fi",
+        "hapus ssid",
+        "lupa wifi",
+        "clear wifi",
+        "forget wifi",
+        "reset ssid",
+        "clear ssid"
+    });
+}
+
+bool IsWifiResetConfirmCommand(const std::string& lowered_text) {
+    return ContainsToken(lowered_text, {
+        "konfirmasi reset wifi",
+        "konfirmasi hapus wifi",
+        "konfirmasi penghapusan",
+        "confirm reset wifi",
+        "yes reset wifi",
+        "ya reset wifi",
+        "iya reset wifi",
+        "ya hapus wifi",
+        "iya hapus wifi",
+        "yes hapus wifi",
+        "hapus wifi sekarang",
+        "reset wifi sekarang",
+        "konfirmasi reset ssid"
+    });
+}
+
+bool IsWifiResetCancelCommand(const std::string& lowered_text) {
+    return ContainsToken(lowered_text, {
+        "batal reset wifi",
+        "batalkan reset wifi",
+        "cancel reset wifi"
+    });
+}
+
+bool IsStandbyCommand(const std::string& normalized_text) {
+    return ContainsNormalizedPhrase(normalized_text, "stop") ||
+           ContainsNormalizedPhrase(normalized_text, "udahan dulu") ||
+           ContainsNormalizedPhrase(normalized_text, "byee") ||
+           ContainsNormalizedPhrase(normalized_text, "bye") ||
+           ContainsNormalizedPhrase(normalized_text, "sampai jumpa") ||
+           ContainsNormalizedPhrase(normalized_text, "sampai nanti");
+}
+
+constexpr int64_t kWifiResetConfirmWindowUs = 15LL * 1000000LL;
+constexpr int64_t kWakeWordStartupSuppressUs = 12LL * 1000000LL;
+constexpr int64_t kWakeWordDebounceUs = 8LL * 1000000LL;
+constexpr int64_t kWakeWordCooldownAfterCloseUs = 8LL * 1000000LL;
 
 } // namespace
 
@@ -102,6 +224,40 @@ bool Application::SetDeviceState(DeviceState state) {
     return state_machine_.TransitionTo(state);
 }
 
+bool Application::IsWifiResetConfirmationPending() {
+    if (wifi_reset_confirmation_pending_ && esp_timer_get_time() > wifi_reset_confirmation_deadline_us_) {
+        wifi_reset_confirmation_pending_ = false;
+        wifi_reset_confirmation_deadline_us_ = 0;
+        ESP_LOGW(TAG, "WiFi reset confirmation timeout");
+    }
+    return wifi_reset_confirmation_pending_;
+}
+
+void Application::ArmWakeWordCooldown(int64_t duration_us) {
+    int64_t deadline_us = esp_timer_get_time() + duration_us;
+    if (deadline_us > wake_word_ignore_until_us_) {
+        wake_word_ignore_until_us_ = deadline_us;
+    }
+}
+
+bool Application::ShouldIgnoreWakeWord(const std::string& wake_word) {
+    int64_t now_us = esp_timer_get_time();
+    if (now_us < wake_word_ignore_until_us_) {
+        long remaining_ms = static_cast<long>((wake_word_ignore_until_us_ - now_us) / 1000);
+        ESP_LOGI(TAG, "Ignore wake word \"%s\" during cooldown (%ld ms left)", wake_word.c_str(), remaining_ms);
+        return true;
+    }
+
+    if (last_wake_word_accepted_us_ > 0 && now_us - last_wake_word_accepted_us_ < kWakeWordDebounceUs) {
+        long delta_ms = static_cast<long>((now_us - last_wake_word_accepted_us_) / 1000);
+        ESP_LOGI(TAG, "Ignore wake word \"%s\" (debounce %ld ms)", wake_word.c_str(), delta_ms);
+        return true;
+    }
+
+    last_wake_word_accepted_us_ = now_us;
+    return false;
+}
+
 void Application::Initialize() {
     auto& board = Board::GetInstance();
     SetDeviceState(kDeviceStateStarting);
@@ -125,6 +281,7 @@ void Application::Initialize() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_WAKE_WORD_DETECTED);
     };
     callbacks.on_vad_change = [this](bool speaking) {
+        ESP_LOGI(TAG, "VAD state: %s", speaking ? "speech" : "silence");
         xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
     };
     audio_service_.SetCallbacks(callbacks);
@@ -136,6 +293,7 @@ void Application::Initialize() {
 
     // Start the clock timer to update the status bar
     esp_timer_start_periodic(clock_timer_handle_, 1000000);
+    ArmWakeWordCooldown(kWakeWordStartupSuppressUs);
 
     // Add MCP common tools (only once during initialization)
     auto& mcp_server = McpServer::GetInstance();
@@ -275,6 +433,11 @@ void Application::Run() {
             if (GetDeviceState() == kDeviceStateListening) {
                 auto led = Board::GetInstance().GetLed();
                 led->OnStateChanged();
+                if (listening_mode_ == kListeningModeAutoStop &&
+                    !audio_service_.IsVoiceDetected() &&
+                    !IsWifiResetConfirmationPending()) {
+                    HandleStopListeningEvent();
+                }
             }
         }
 
@@ -295,6 +458,14 @@ void Application::Run() {
             if (local_song_playing_ && audio_service_.IsIdle()) {
                 local_song_playing_ = false;
                 ESP_LOGI(TAG, "Local song playback completed");
+            }
+
+            if (wifi_reset_confirmation_pending_ && !IsWifiResetConfirmationPending()) {
+                if (GetDeviceState() == kDeviceStateListening &&
+                    listening_mode_ == kListeningModeAutoStop &&
+                    !audio_service_.IsVoiceDetected()) {
+                    HandleStopListeningEvent();
+                }
             }
         
             // Print debug info every 10 seconds
@@ -559,6 +730,7 @@ void Application::InitializeProtocol() {
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
+            ArmWakeWordCooldown(kWakeWordCooldownAfterCloseUs);
             SetDeviceState(kDeviceStateIdle);
         });
     });
@@ -570,6 +742,17 @@ void Application::InitializeProtocol() {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
+                    if (IsWifiResetConfirmationPending()) {
+                        ESP_LOGI(TAG, "Ignore TTS start while waiting for WiFi reset confirmation");
+                        if (protocol_) {
+                            protocol_->SendAbortSpeaking(kAbortReasonWakeWordDetected);
+                            protocol_->SendStartListening(kListeningModeAutoStop);
+                        }
+                        if (GetDeviceState() != kDeviceStateListening) {
+                            SetDeviceState(kDeviceStateListening);
+                        }
+                        return;
+                    }
                     aborted_ = false;
                     SetDeviceState(kDeviceStateSpeaking);
                 });
@@ -586,6 +769,10 @@ void Application::InitializeProtocol() {
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
+                    if (IsWifiResetConfirmationPending()) {
+                        ESP_LOGI(TAG, "Ignore TTS sentence while waiting for WiFi reset confirmation");
+                        return;
+                    }
                     ESP_LOGI(TAG, "<< %s", text->valuestring);
                     Schedule([this, display, message = std::string(text->valuestring)]() {
                         display->SetChatMessage("assistant", message.c_str());
@@ -598,7 +785,13 @@ void Application::InitializeProtocol() {
                 ESP_LOGI(TAG, ">> %s", text->valuestring);
                 Schedule([this, display, message = std::string(text->valuestring)]() {
                     display->SetChatMessage("user", message.c_str());
-                    TryHandleLocalSongCommand(message);
+                    if (TryHandleWifiResetCommand(message)) {
+                        return;
+                    }
+                    if (TryHandleLocalSongCommand(message)) {
+                        return;
+                    }
+                    TryHandleStandbyCommand(message);
                 });
             }
         } else if (strcmp(type->valuestring, "llm") == 0) {
@@ -757,6 +950,94 @@ bool Application::PlayLocalSong(int song_index) {
     return false;
 }
 
+bool Application::ClearStoredWifiCredentials() {
+    nvs_handle_t nvs_handle = 0;
+    esp_err_t ret = nvs_open("wifi", NVS_READWRITE, &nvs_handle);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGI(TAG, "WiFi namespace not found, nothing to clear");
+        return true;
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open WiFi namespace: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    ret = nvs_erase_all(nvs_handle);
+    if (ret == ESP_OK) {
+        ret = nvs_commit(nvs_handle);
+    }
+    nvs_close(nvs_handle);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to clear WiFi credentials: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Stored WiFi credentials cleared");
+    return true;
+}
+
+bool Application::TryHandleWifiResetCommand(const std::string& text) {
+    std::string lowered_text = ToLowerAscii(text);
+    std::string normalized_text = NormalizeCommandText(lowered_text);
+    int64_t now_us = esp_timer_get_time();
+    auto display = Board::GetInstance().GetDisplay();
+
+    if (IsWifiResetConfirmationPending()) {
+        if (IsWifiResetCancelCommand(lowered_text)) {
+            wifi_reset_confirmation_pending_ = false;
+            wifi_reset_confirmation_deadline_us_ = 0;
+            display->ShowNotification("WiFi reset cancelled");
+            return true;
+        }
+
+        bool is_confirm = IsWifiResetConfirmCommand(lowered_text) ||
+                          IsWifiResetQuickConfirmCommand(normalized_text);
+        if (!is_confirm) {
+            return false;
+        }
+
+        wifi_reset_confirmation_pending_ = false;
+        wifi_reset_confirmation_deadline_us_ = 0;
+
+        if (!ClearStoredWifiCredentials()) {
+            display->ShowNotification("Failed to reset SSID");
+            audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);
+            return true;
+        }
+
+        display->ShowNotification("SSID reset, rebooting...");
+        Reboot();
+        return true;
+    }
+
+    if (IsWifiResetConfirmCommand(lowered_text) || IsWifiResetQuickConfirmCommand(normalized_text)) {
+        display->ShowNotification("Say 'reset wifi' first");
+        return true;
+    }
+
+    if (!IsWifiResetCommand(lowered_text)) {
+        return false;
+    }
+
+    wifi_reset_confirmation_pending_ = true;
+    wifi_reset_confirmation_deadline_us_ = now_us + kWifiResetConfirmWindowUs;
+    display->ShowNotification("Say: ya / konfirmasi reset wifi (15s)");
+    audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);
+    if (GetDeviceState() == kDeviceStateSpeaking) {
+        ESP_LOGI(TAG, "Return to listening for WiFi reset confirmation");
+        if (protocol_) {
+            protocol_->SendAbortSpeaking(kAbortReasonWakeWordDetected);
+            protocol_->SendStartListening(kListeningModeAutoStop);
+        }
+        SetDeviceState(kDeviceStateListening);
+    } else if (protocol_ && GetDeviceState() == kDeviceStateListening) {
+        protocol_->SendStartListening(kListeningModeAutoStop);
+    }
+    ESP_LOGW(TAG, "WiFi reset command detected, waiting for confirmation");
+    return true;
+}
+
 bool Application::TryHandleLocalSongCommand(const std::string& text) {
     std::string lowered_text = ToLowerAscii(text);
     if (local_song_playing_ && IsLocalSongStopCommand(lowered_text)) {
@@ -807,6 +1088,32 @@ bool Application::TryHandleLocalSongCommand(const std::string& text) {
         display->ShowNotification("song1.ogg not found");
     }
     audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);
+    return true;
+}
+
+bool Application::TryHandleStandbyCommand(const std::string& text) {
+    if (GetDeviceState() != kDeviceStateListening) {
+        return false;
+    }
+
+    std::string normalized_text = NormalizeCommandText(ToLowerAscii(text));
+    if (!IsStandbyCommand(normalized_text)) {
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Standby command detected: \"%s\"", text.c_str());
+    wifi_reset_confirmation_pending_ = false;
+    wifi_reset_confirmation_deadline_us_ = 0;
+
+    auto display = Board::GetInstance().GetDisplay();
+    display->ShowNotification("Standby");
+    ArmWakeWordCooldown(kWakeWordCooldownAfterCloseUs);
+
+    if (protocol_ && protocol_->IsAudioChannelOpened()) {
+        protocol_->CloseAudioChannel();
+    } else {
+        SetDeviceState(kDeviceStateIdle);
+    }
     return true;
 }
 
@@ -905,6 +1212,7 @@ void Application::HandleToggleChatEvent() {
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
     } else if (state == kDeviceStateListening) {
+        ArmWakeWordCooldown(kWakeWordCooldownAfterCloseUs);
         protocol_->CloseAudioChannel();
     }
 }
@@ -957,6 +1265,7 @@ void Application::HandleStopListeningEvent() {
             return;
         }
     } else if (state == kDeviceStateListening) {
+        ArmWakeWordCooldown(kWakeWordCooldownAfterCloseUs);
         if (protocol_) {
             protocol_->SendStopListening();
         }
@@ -972,6 +1281,10 @@ void Application::HandleWakeWordDetectedEvent() {
     auto state = GetDeviceState();
     
     if (state == kDeviceStateIdle) {
+        auto wake_word = audio_service_.GetLastWakeWord();
+        if (ShouldIgnoreWakeWord(wake_word)) {
+            return;
+        }
         audio_service_.EncodeWakeWord();
 
         if (!protocol_->IsAudioChannelOpened()) {
@@ -982,8 +1295,13 @@ void Application::HandleWakeWordDetectedEvent() {
             }
         }
 
-        auto wake_word = audio_service_.GetLastWakeWord();
         ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
+        if (TryHandleWifiResetCommand(wake_word)) {
+            if (IsWifiResetConfirmationPending()) {
+                SetListeningMode(kListeningModeAutoStop);
+            }
+            return;
+        }
 #if CONFIG_SEND_WAKE_WORD_DATA
         // Encode and send the wake word data to the server
         while (auto packet = audio_service_.PopWakeWordPacket()) {
@@ -1160,6 +1478,9 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
     auto state = GetDeviceState();
     
     if (state == kDeviceStateIdle) {
+        if (ShouldIgnoreWakeWord(wake_word)) {
+            return;
+        }
         audio_service_.EncodeWakeWord();
 
         if (!protocol_->IsAudioChannelOpened()) {
@@ -1171,6 +1492,12 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
         }
 
         ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
+        if (TryHandleWifiResetCommand(wake_word)) {
+            if (IsWifiResetConfirmationPending()) {
+                SetListeningMode(kListeningModeAutoStop);
+            }
+            return;
+        }
 #if CONFIG_USE_AFE_WAKE_WORD || CONFIG_USE_CUSTOM_WAKE_WORD
         // Encode and send the wake word data to the server
         while (auto packet = audio_service_.PopWakeWordPacket()) {

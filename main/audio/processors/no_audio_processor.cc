@@ -4,9 +4,21 @@
 
 #define TAG "NoAudioProcessor"
 
+namespace {
+constexpr int32_t kSpeechPeakThreshold = 1200;
+constexpr int32_t kSilencePeakThreshold = 700;
+constexpr int kSpeechFramesToTrigger = 2;
+constexpr int kVadSilenceHoldMs = 700;
+}
+
 void NoAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srmodel_list_t* models_list) {
     codec_ = codec;
     frame_samples_ = frame_duration_ms * 16000 / 1000;
+    frame_duration_ms_ = frame_duration_ms > 0 ? frame_duration_ms : 60;
+    silence_frames_to_trigger_ = (kVadSilenceHoldMs + frame_duration_ms_ - 1) / frame_duration_ms_;
+    if (silence_frames_to_trigger_ < 1) {
+        silence_frames_to_trigger_ = 1;
+    }
 }
 
 void NoAudioProcessor::Feed(std::vector<int16_t>&& data) {
@@ -29,11 +41,6 @@ void NoAudioProcessor::Feed(std::vector<int16_t>&& data) {
             }
         }
 
-        constexpr int32_t kSpeechPeakThreshold = 1200;
-        constexpr int32_t kSilencePeakThreshold = 700;
-        constexpr int kSpeechFramesToTrigger = 2;
-        constexpr int kSilenceFramesToTrigger = 10;
-
         if (peak >= kSpeechPeakThreshold) {
             speech_frames_++;
             silent_frames_ = 0;
@@ -45,7 +52,7 @@ void NoAudioProcessor::Feed(std::vector<int16_t>&& data) {
         if (!is_speaking_ && speech_frames_ >= kSpeechFramesToTrigger) {
             is_speaking_ = true;
             vad_state_change_callback_(true);
-        } else if (is_speaking_ && silent_frames_ >= kSilenceFramesToTrigger) {
+        } else if (is_speaking_ && silent_frames_ >= silence_frames_to_trigger_) {
             is_speaking_ = false;
             vad_state_change_callback_(false);
         }

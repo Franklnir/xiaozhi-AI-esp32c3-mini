@@ -27,7 +27,7 @@ A XiaoZhi AI board for ESP32-C3 using:
 1. **First boot**: Click GPIO3 button to enter WiFi config mode
 2. **Push-to-talk mode (GPIO3)**: Hold to talk, release to stop (original function unchanged)
 3. **Hands-free mode (default ON)**: Just speak without pressing; after you stop talking and silence is detected, XiaoZhi responds
-4. **Auto low power in hands-free**: If no voice is detected for 12 seconds, device closes audio channel and returns to low-power standby
+4. **Auto low power in hands-free**: If no voice is detected for 25 seconds, device closes audio channel and returns to low-power standby
 5. **Wake by voice command**: In standby, say wake word (default C3 model: `Hi Jason`) to wake and start listening again
    Note: ESP32-C3 built-in wake word models do not provide `Hallo Alexa`.
 6. **GPIO2 toggle**: Click GPIO2 to switch hands-free ON/OFF
@@ -49,3 +49,20 @@ A XiaoZhi AI board for ESP32-C3 using:
   - `songX.ogg` (assets partition)
   - `songs/songX.ogg` (assets partition)
   - `music/songX.ogg` (assets partition)
+
+## Voice Standby Command
+
+- While device is in listening mode, say one of:
+  - `stop`
+  - `udahan dulu`
+  - `byee` / `bye`
+  - `sampai jumpa`
+  - `sampai nanti`
+- Device will leave listening mode and return to standby/low-power flow.
+
+## Voice WiFi Reset (with confirmation)
+
+- Step 1 (request reset): say `reset wifi` (or `ganti wifi` / `hapus wifi` / `reset ssid`)
+- Step 2 (confirm within 15s): say `ya` (or `konfirmasi reset wifi`)
+- Cancel pending reset: say `batal reset wifi`
+- On success, device clears saved WiFi credentials and reboots.

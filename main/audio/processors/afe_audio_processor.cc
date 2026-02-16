@@ -1,9 +1,14 @@
 #include "afe_audio_processor.h"
 #include <esp_log.h>
+#include <esp_timer.h>
 
 #define PROCESSOR_RUNNING 0x01
 
 #define TAG "AfeAudioProcessor"
+
+namespace {
+constexpr int64_t kVadSilenceHoldUs = 700LL * 1000LL;
+}
 
 AfeAudioProcessor::AfeAudioProcessor()
     : afe_data_(nullptr) {
@@ -96,11 +101,15 @@ void AfeAudioProcessor::Feed(std::vector<int16_t>&& data) {
 }
 
 void AfeAudioProcessor::Start() {
+    is_speaking_ = false;
+    silence_started_us_ = 0;
     xEventGroupSetBits(event_group_, PROCESSOR_RUNNING);
 }
 
 void AfeAudioProcessor::Stop() {
     xEventGroupClearBits(event_group_, PROCESSOR_RUNNING);
+    is_speaking_ = false;
+    silence_started_us_ = 0;
     if (afe_data_ != nullptr) {
         afe_iface_->reset_buffer(afe_data_);
     }
@@ -140,12 +149,23 @@ void AfeAudioProcessor::AudioProcessorTask() {
 
         // VAD state change
         if (vad_state_change_callback_) {
-            if (res->vad_state == VAD_SPEECH && !is_speaking_) {
-                is_speaking_ = true;
-                vad_state_change_callback_(true);
+            if (res->vad_state == VAD_SPEECH) {
+                silence_started_us_ = 0;
+                if (!is_speaking_) {
+                    is_speaking_ = true;
+                    vad_state_change_callback_(true);
+                }
             } else if (res->vad_state == VAD_SILENCE && is_speaking_) {
-                is_speaking_ = false;
-                vad_state_change_callback_(false);
+                int64_t now_us = esp_timer_get_time();
+                if (silence_started_us_ == 0) {
+                    silence_started_us_ = now_us;
+                } else if (now_us - silence_started_us_ >= kVadSilenceHoldUs) {
+                    is_speaking_ = false;
+                    silence_started_us_ = 0;
+                    vad_state_change_callback_(false);
+                }
+            } else {
+                silence_started_us_ = 0;
             }
         }
 

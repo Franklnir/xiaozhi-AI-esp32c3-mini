@@ -43,6 +43,7 @@ private:
     bool hands_free_enabled_ = true;
     bool wait_for_wake_word_ = false;
     bool boot_button_pressed_ = false;
+    DeviceState last_observed_state_ = kDeviceStateUnknown;
 
     void ToggleHandsFreeMode() {
         hands_free_enabled_ = !hands_free_enabled_;
@@ -173,6 +174,18 @@ private:
         auto state = app.GetDeviceState();
         int64_t now_us = esp_timer_get_time();
 
+        // Refresh user idle timer when entering listening from another state
+        // (e.g. wake word just detected), so it won't immediately timeout.
+        if (state != last_observed_state_) {
+            if (state == kDeviceStateListening) {
+                last_voice_activity_us_ = now_us;
+            }
+            last_observed_state_ = state;
+        }
+
+        bool is_user_speaking = app.IsVoiceDetected();
+        bool user_idle_timed_out = (now_us - last_voice_activity_us_) >= (int64_t)HANDS_FREE_IDLE_TIMEOUT_MS * 1000;
+
         // Push-to-talk (GPIO3) must not be interrupted by hands-free timer logic.
         if (boot_button_pressed_) {
             last_voice_activity_us_ = now_us;
@@ -180,23 +193,31 @@ private:
             return;
         }
 
-        // Do not auto-open listening while local audio is still playing.
-        if (!app.GetAudioService().IsIdle()) {
+        // Only user voice (VAD) refreshes inactivity timer.
+        if (is_user_speaking) {
             last_voice_activity_us_ = now_us;
+            wait_for_wake_word_ = false;
             return;
         }
 
-        // When user/device is actively talking, refresh activity timestamp.
-        if (state == kDeviceStateSpeaking || app.IsVoiceDetected()) {
-            last_voice_activity_us_ = now_us;
+        // Keep channel state while device is speaking or still playing audio.
+        // Do not refresh user inactivity timer from playback/TTS activity.
+        if (state == kDeviceStateSpeaking || !app.GetAudioService().IsIdle()) {
             wait_for_wake_word_ = false;
             return;
         }
 
         // In listening but no voice for timeout => close channel and go LOW_POWER.
         if (state == kDeviceStateListening) {
-            if (now_us - last_voice_activity_us_ >= (int64_t)HANDS_FREE_IDLE_TIMEOUT_MS * 1000) {
-                ESP_LOGI(TAG, "Hands-free idle timeout %d ms, entering low-power standby", HANDS_FREE_IDLE_TIMEOUT_MS);
+            if (app.IsWifiResetConfirmationPending()) {
+                last_voice_activity_us_ = now_us;
+                return;
+            }
+            if (user_idle_timed_out) {
+                int64_t idle_ms = (now_us - last_voice_activity_us_) / 1000;
+                // ESP log formatting on this target may not print %lld reliably.
+                ESP_LOGI(TAG, "Hands-free idle timeout %d ms (idle=%ld ms), entering low-power standby",
+                         HANDS_FREE_IDLE_TIMEOUT_MS, static_cast<long>(idle_ms));
                 app.ToggleChatState();  // listening -> close channel -> idle -> LOW_POWER
 #if CONFIG_USE_ESP_WAKE_WORD
                 wait_for_wake_word_ = true;
@@ -208,7 +229,6 @@ private:
                 wait_for_wake_word_ = false;
 #endif
                 last_hands_free_trigger_us_ = now_us;
-                last_voice_activity_us_ = now_us;
             }
             return;
         }
@@ -217,6 +237,20 @@ private:
         // - if waiting for wake word, do not auto reopen channel.
         // - if not waiting, keep hands-free active by opening channel.
         if (state == kDeviceStateIdle) {
+            if (user_idle_timed_out) {
+#if CONFIG_USE_ESP_WAKE_WORD
+                if (!wait_for_wake_word_) {
+                    wait_for_wake_word_ = true;
+                    char hint[64];
+                    snprintf(hint, sizeof(hint), "Standby, say: %s", HANDS_FREE_WAKE_WORD_HINT);
+                    GetDisplay()->ShowNotification(hint);
+                }
+#endif
+                // Keep device in low-power standby after user idle timeout.
+                // Listening will resume only on explicit trigger (wake word / button).
+                return;
+            }
+
             if (wait_for_wake_word_) {
                 return;
             }
@@ -227,7 +261,6 @@ private:
 
             last_hands_free_trigger_us_ = now_us;
             app.ToggleChatState();  // idle -> listening(auto mode)
-            last_voice_activity_us_ = now_us;
             return;
         }
 

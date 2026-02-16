@@ -65,6 +65,7 @@ public:
 
     DeviceState GetDeviceState() const { return state_machine_.GetState(); }
     bool IsVoiceDetected() const { return audio_service_.IsVoiceDetected(); }
+    bool IsWifiResetConfirmationPending();
     
     /**
      * Request state transition
@@ -141,6 +142,10 @@ private:
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     bool local_song_playing_ = false;
+    bool wifi_reset_confirmation_pending_ = false;
+    int64_t wifi_reset_confirmation_deadline_us_ = 0;
+    int64_t wake_word_ignore_until_us_ = 0;
+    int64_t last_wake_word_accepted_us_ = 0;
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
@@ -162,7 +167,12 @@ private:
     void CheckAssetsVersion();
     void CheckNewVersion();
     void InitializeProtocol();
+    void ArmWakeWordCooldown(int64_t duration_us);
+    bool ShouldIgnoreWakeWord(const std::string& wake_word);
+    bool ClearStoredWifiCredentials();
+    bool TryHandleWifiResetCommand(const std::string& text);
     bool TryHandleLocalSongCommand(const std::string& text);
+    bool TryHandleStandbyCommand(const std::string& text);
     bool StopLocalSongPlayback(bool show_notification);
     bool PlayLocalSong(int song_index);
     bool PlayOggFile(const std::string& path);

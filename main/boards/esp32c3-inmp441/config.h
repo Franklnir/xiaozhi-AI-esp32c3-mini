@@ -25,7 +25,7 @@
 #define HANDS_FREE_AUTO_LISTEN              1
 #define HANDS_FREE_AUTO_LISTEN_INTERVAL_MS  500
 #define HANDS_FREE_AUTO_LISTEN_RETRY_MS     3000
-#define HANDS_FREE_IDLE_TIMEOUT_MS          12000
+#define HANDS_FREE_IDLE_TIMEOUT_MS          25000
 #define HANDS_FREE_WAKE_WORD_HINT           "Hi Jason"
 
 // LED Configuration (optional - set to NC if not used)
