@@ -1,0 +1,102 @@
+#include "esp_wake_word.h"
+#include <esp_log.h>
+#include <cstring>
+#include "settings.h"
+
+
+#define TAG "EspWakeWord"
+
+EspWakeWord::EspWakeWord() {
+}
+
+EspWakeWord::~EspWakeWord() {
+    if (wakenet_data_ != nullptr) {
+        wakenet_iface_->destroy(wakenet_data_);
+        esp_srmodel_deinit(wakenet_model_);
+    }
+}
+
+bool EspWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
+    codec_ = codec;
+
+    if (models_list == nullptr) {
+        wakenet_model_ = esp_srmodel_init("model");
+    } else {
+        wakenet_model_ = models_list;
+    }
+
+    if (wakenet_model_ == nullptr || wakenet_model_->num == -1) {
+        ESP_LOGE(TAG, "Failed to initialize wakenet model");
+        return false;
+    }
+    // Pilihan wake word dapat dikonfigurasi via NVS ("audio"/"wake_word")
+    Settings audio_settings("audio", false);
+    std::string preferred = audio_settings.GetString("wake_word", "hijason");
+
+    int selected_model_index = 0;
+    if (wakenet_model_->num > 1) {
+        ESP_LOGW(TAG, "More than one model found, selecting preferred wake word: %s", preferred.c_str());
+        for (int i = 0; i < wakenet_model_->num; ++i) {
+            const char* candidate = wakenet_model_->model_name[i];
+            if (candidate != nullptr && std::strstr(candidate, preferred.c_str()) != nullptr) {
+                selected_model_index = i;
+                break;
+            }
+        }
+    } else if (wakenet_model_->num == 0) {
+        ESP_LOGE(TAG, "No model found");
+        return false;
+    }
+    char *model_name = wakenet_model_->model_name[selected_model_index];
+    ESP_LOGI(TAG, "Selected wake word model: %s (%d/%d)", model_name, selected_model_index + 1, wakenet_model_->num);
+    wakenet_iface_ = (esp_wn_iface_t*)esp_wn_handle_from_name(model_name);
+    wakenet_data_ = wakenet_iface_->create(model_name, DET_MODE_95);
+
+    int frequency = wakenet_iface_->get_samp_rate(wakenet_data_);
+    int audio_chunksize = wakenet_iface_->get_samp_chunksize(wakenet_data_);
+    ESP_LOGI(TAG, "Wake word(%s),freq: %d, chunksize: %d", model_name, frequency, audio_chunksize);
+
+    return true;
+}
+
+void EspWakeWord::OnWakeWordDetected(std::function<void(const std::string& wake_word)> callback) {
+    wake_word_detected_callback_ = callback;
+}
+
+void EspWakeWord::Start() {
+    running_ = true;
+}
+
+void EspWakeWord::Stop() {
+    running_ = false;
+}
+
+void EspWakeWord::Feed(const std::vector<int16_t>& data) {
+    if (wakenet_data_ == nullptr || !running_) {
+        return;
+    }
+
+    int res = wakenet_iface_->detect(wakenet_data_, (int16_t *)data.data());
+    if (res > 0) {
+        last_detected_wake_word_ = wakenet_iface_->get_word_name(wakenet_data_, res);
+        running_ = false;
+
+        if (wake_word_detected_callback_) {
+            wake_word_detected_callback_(last_detected_wake_word_);
+        }
+    }
+}
+
+size_t EspWakeWord::GetFeedSize() {
+    if (wakenet_data_ == nullptr) {
+        return 0;
+    }
+    return wakenet_iface_->get_samp_chunksize(wakenet_data_);
+}
+
+void EspWakeWord::EncodeWakeWordData() {
+}
+
+bool EspWakeWord::GetWakeWordOpus(std::vector<uint8_t>& opus) {
+    return false;
+}
